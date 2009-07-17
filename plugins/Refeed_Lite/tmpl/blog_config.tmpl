@@ -1,0 +1,17 @@
+<fieldset>
+    <mtapp:setting
+        id="feeds"
+        label="Feed URIs"
+        hint="Specify a list of RSS and Atom feeds to pull in to your blog. Feed URIs should be one per line.">
+        <textarea name="feeds" id="feeds" rows="6" style="width: 100%"><TMPL_VAR NAME=FEEDS ESCAPE=HTML></textarea>
+    </mtapp:setting>
+</fieldset>
+
+<fieldset>
+    <mtapp:setting
+        id="author"
+        label="Author's Username"
+        hint="The MT username of the author by whom new posts will be created when new items are found in the feed.">
+        <input name="author" id="author" value="<TMPL_VAR NAME=AUTHOR ESCAPE=HTML>" />
+    </mtapp:setting>
+</fieldset>
