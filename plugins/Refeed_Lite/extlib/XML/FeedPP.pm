@@ -58,9 +58,22 @@ halted.
 The URL on the remote web server is also available as the first argument.
 L<LWP::UserAgent> is required to download it.
 
-=head2  $feed = XML::FeedPP->new( "<?xml?><rss version=..." );
+=head2  $feed = XML::FeedPP->new( '<rss version="2.0">...' );
 
 The XML source code is also available as the first argument.
+
+=head2  $feed = XML::FeedPP->new( $source, -type => $type );
+
+The C<-type> argument allows you to specify type of $source 
+from choice of C<'file'>, C<'url'> or C<'string'>.
+
+=head2  $feed = XML::FeedPP->new( $source, utf8_flag => 1 );
+
+This makes utf8 flag on for every feed elements.
+Perl 5.8.1 or later is required to use this.
+
+Note that any other options for C<XML::TreePP> constructor are also 
+allowed like this. See more detail on L<XML::TreePP>.
 
 =head2  $feed = XML::FeedPP::RSS->new( $source );
 
@@ -107,6 +120,14 @@ $encoding is optional, and the default encoding is 'UTF-8'.  On Perl
 available.  On Perl 5.005 and 5.6.1, only four encodings supported by
 the Jcode module are available: 'UTF-8', 'Shift_JIS', 'EUC-JP' and
 'ISO-2022-JP'.  'UTF-8' is recommended for overall compatibility.
+
+=head2  $string = $feed->to_string( indent => 4 );
+
+This makes the output more human readable by indenting appropriately.
+This does not strictly follow the XML specification but does looks nice.
+
+Note that any other options for C<XML::TreePP> constructor are also 
+allowed like this. See more detail on L<XML::TreePP>.
 
 =head2  $feed->to_file( $filename, $encoding );
 
@@ -350,7 +371,7 @@ Yusuke Kawasaki, http://www.kawa.net/
 
 =head1 COPYRIGHT AND LICENSE
 
-Copyright (c) 2006-2008 Yusuke Kawasaki. All rights reserved.
+Copyright (c) 2006-2009 Yusuke Kawasaki. All rights reserved.
 This program is free software; you can redistribute it and/or
 modify it under the same terms as Perl itself.
 
@@ -371,7 +392,7 @@ use vars qw(
     $XMLNS_ATOM10
 );
 
-$VERSION = "0.35";
+$VERSION = "0.40";
 
 $RSS20_VERSION  = '2.0';
 $ATOM03_VERSION = '0.3';
@@ -456,6 +477,8 @@ sub new {
         my $root = join( " ", sort keys %$self );
         Carp::croak "Invalid feed format: $root";
     }
+
+    $self->validate_feed($source);
     $self->init_feed();
     $self->elements(@$init) if ref $init;
     $self;
@@ -471,38 +494,64 @@ sub feed_bless {
 sub load {
     my $self   = shift;
     my $source = shift;
+    my $args   = { @_ };
+    my $method = $args->{'-type'};
     Carp::croak "No feed source" unless defined $source;
 
+    if ( ! $method ) {
+        if ( $source =~ m#^https?://#s ) {
+            $method = 'url';
+        }
+        elsif ( $source =~ m#(?:\s*\xEF\xBB\xBF)?\s*
+                             (<(\?xml|!DOCTYPE|rdf:RDF|rss|feed)\W)#xis ) {
+            $method = 'string';
+        }
+        elsif ( $source !~ /[\r\n]/ && -f $source ) {
+            $method = 'file';
+        }
+        else {
+            Carp::croak "Invalid feed source: $source";
+        }
+    }
+
+    my $opts = { map { $_ => $args->{$_} } grep { ! /^-/ } keys %$args };
+    my $tpp = XML::TreePP->new(%$TREEPP_OPTIONS, %$opts);
+
     my $tree;
-    my $tpp = XML::TreePP->new(%$TREEPP_OPTIONS, @_);
-    if ( $source =~ m#^https?://#s ) {
+    if ( $method eq 'url' ) {
         $tree = $tpp->parsehttp( GET => $source );
     }
-    elsif ( $source =~ m#(^\s*)(<\?xml.*\?>|<\!DOCTYPE)#i ) {
+    elsif ( $method eq 'string' ) {
         $tree = $tpp->parse($source);
     }
-    elsif ( $source !~ /[\r\n]/ && -f $source ) {
+    elsif ( $method eq 'file' ) {
         $tree = $tpp->parsefile($source);
     }
-    Carp::croak "Invalid feed source: $source" unless ref $tree;
+    else {
+        Carp::croak "Invalid load type: $method";
+    }
+
+    Carp::croak "Loading failed: $source" unless ref $tree;
     %$self = %$tree;    # override myself
     $self;
 }
 
 sub to_string {
-    my $self   = shift;
-    my $encode = shift;
-    my $opt = { output_encoding => $encode, @_ };
-    my $tpp = XML::TreePP->new( %$TREEPP_OPTIONS, %$opt );
+    my $self = shift;
+    my( $args, $encode, @rest ) = XML::FeedPP::Util::param_even_odd(@_);
+    $args ||= \@rest;
+    my @opts = ( output_encoding => $encode ) if $encode;
+    my $tpp = XML::TreePP->new( %$TREEPP_OPTIONS, @opts, @$args );
     $tpp->write( $self, $encode );
 }
 
 sub to_file {
-    my $self   = shift;
-    my $file   = shift;
-    my $encode = shift;
-    my $opt = { output_encoding => $encode, @_ };
-    my $tpp = XML::TreePP->new( %$TREEPP_OPTIONS, %$opt );
+    my $self = shift;
+    my $file = shift;
+    my( $args, $encode, @rest ) = XML::FeedPP::Util::param_even_odd(@_);
+    $args ||= \@rest;
+    my @opts = ( output_encoding => $encode ) if $encode;
+    my $tpp = XML::TreePP->new( %$TREEPP_OPTIONS, @opts, @$args );
     $tpp->writefile( $file, $self, $encode );
 }
 
@@ -787,26 +836,35 @@ sub new {
     bless $self, $package;
     if ( defined $source ) {
         $self->load($source, @rest);
-        if ( !ref $self || !ref $self->{rss} ) {
-            Carp::croak "Invalid RSS format: $source";
-        }
+        $self->validate_feed($source);
     }
     $self->init_feed();
     $self->elements(@$init) if ref $init;
     $self;
 }
 
+sub validate_feed {
+    my $self   = shift;
+    my $source = shift || $self;
+    if ( !ref $self || !ref $self->{rss} ) {
+        Carp::croak "Invalid RSS format: $source";
+    }
+}
+
 sub init_feed {
     my $self = shift or return;
 
-    $self->{rss}               ||= {};
+    $self->{rss} ||= {};
+    if ( ! UNIVERSAL::isa( $self->{rss}, 'HASH' ) ) {
+        Carp::croak "Invalid RSS format: $self->{rss}";
+    }
     $self->{rss}->{'-version'} ||= $XML::FeedPP::RSS20_VERSION;
 
     $self->{rss}->{channel} ||= XML::FeedPP::Element->new();
     XML::FeedPP::Element->ref_bless( $self->{rss}->{channel} );
 
     $self->{rss}->{channel}->{item} ||= [];
-    if ( UNIVERSAL::isa( $self->{rss}->{channel}->{item}, "HASH" ) ) {
+    if ( UNIVERSAL::isa( $self->{rss}->{channel}->{item}, 'HASH' ) ) {
 
         # only one item
         $self->{rss}->{channel}->{item} = [ $self->{rss}->{channel}->{item} ];
@@ -886,7 +944,7 @@ sub get_item {
 sub sort_item {
     my $self = shift;
     my $list = $self->{rss}->{channel}->{item} or return;
-    my $epoch = [ map { $_->get_pubDate_epoch() } @$list ];
+    my $epoch = [ map { $_->get_pubDate_epoch() || 0 } @$list ];
     my $sorted = [ map { $list->[$_] } sort {
         $epoch->[$b] <=> $epoch->[$a]
     } 0 .. $#$list ];
@@ -1001,8 +1059,15 @@ sub guid {
     my $self = shift;
     my $guid = shift;
     return $self->get_value("guid") unless defined $guid;
-    my $perma = shift || "true";
-    $self->set_value( guid => $guid, isPermaLink => $perma );
+    my @args = @_;
+    if ( ! scalar @args ) {
+        # default
+        @args = ( 'isPermaLink' => 'true' );
+    } elsif ( scalar @args == 1 ) {
+        # XML::FeedPP 0.36's behavior
+        unshift( @args, 'isPermaLink' );
+    }
+    $self->set_value( guid => $guid, @args );
 }
 
 sub pubDate {
@@ -1058,19 +1123,27 @@ sub new {
     bless $self, $package;
     if ( defined $source ) {
         $self->load($source, @rest);
-        if ( !ref $self || !ref $self->{'rdf:RDF'} ) {
-            Carp::croak "Invalid RDF format: $source";
-        }
+        $self->validate_feed($source);
     }
     $self->init_feed();
     $self->elements(@$init) if ref $init;
     $self;
 }
 
+sub validate_feed {
+    my $self   = shift;
+    my $source = shift || $self;
+    if ( !ref $self || !ref $self->{'rdf:RDF'} ) {
+        Carp::croak "Invalid RDF format: $source";
+    }
+}
 sub init_feed {
     my $self = shift or return;
 
     $self->{'rdf:RDF'} ||= {};
+    if ( ! UNIVERSAL::isa( $self->{'rdf:RDF'}, 'HASH' ) ) {
+        Carp::croak "Invalid RDF format: $self->{'rdf:RDF'}";
+    }
     $self->xmlns( 'xmlns'     => $XML::FeedPP::XMLNS_RSS );
     $self->xmlns( 'xmlns:rdf' => $XML::FeedPP::XMLNS_RDF );
     $self->xmlns( 'xmlns:dc'  => $XML::FeedPP::XMLNS_DC );
@@ -1096,11 +1169,11 @@ sub init_feed {
     }
 
     $rdfseq->{'rdf:li'} ||= [];
-    if ( UNIVERSAL::isa( $rdfseq->{'rdf:li'}, "HASH" ) ) {
+    if ( UNIVERSAL::isa( $rdfseq->{'rdf:li'}, 'HASH' ) ) {
         $rdfseq->{'rdf:li'} = [ $rdfseq->{'rdf:li'} ];
     }
     $self->{'rdf:RDF'}->{item} ||= [];
-    if ( UNIVERSAL::isa( $self->{'rdf:RDF'}->{item}, "HASH" ) ) {
+    if ( UNIVERSAL::isa( $self->{'rdf:RDF'}->{item}, 'HASH' ) ) {
 
         # force array when only one item exist
         $self->{'rdf:RDF'}->{item} = [ $self->{'rdf:RDF'}->{item} ];
@@ -1193,7 +1266,7 @@ sub get_item {
 sub sort_item {
     my $self = shift;
     my $list = $self->{'rdf:RDF'}->{item} or return;
-    my $epoch = [ map { $_->get_pubDate_epoch() } @$list ];
+    my $epoch = [ map { $_->get_pubDate_epoch() || 0 } @$list ];
     my $sorted = [ map { $list->[$_] } sort {
         $epoch->[$b] <=> $epoch->[$a]
     } 0 .. $#$list ];
@@ -1355,13 +1428,19 @@ sub new {
     bless $self, $package;
     if ( defined $source ) {
         $self->load($source, @rest);
-        if ( !ref $self || !ref $self->{feed} ) {
-            Carp::croak "Invalid Atom format: $source";
-        }
+        $self->validate_feed($source);
     }
     $self->init_feed();
     $self->elements(@$init) if ref $init;
     $self;
+}
+
+sub validate_feed {
+    my $self   = shift;
+    my $source = shift || $self;
+    if ( !ref $self || !ref $self->{feed} ) {
+        Carp::croak "Invalid Atom format: $source";
+    }
 }
 
 sub merge_native_channel {
@@ -1428,7 +1507,7 @@ sub get_item {
 sub sort_item {
     my $self = shift;
     my $list = $self->{feed}->{entry} or return;
-    my $epoch = [ map { $_->get_pubDate_epoch() } @$list ];
+    my $epoch = [ map { $_->get_pubDate_epoch() || 0 } @$list ];
     my $sorted = [ map { $list->[$_] } sort {
         $epoch->[$b] <=> $epoch->[$a]
     } 0 .. $#$list ];
@@ -1479,7 +1558,7 @@ sub image {
     my $title = shift;
 
     my $link = $self->{feed}->{link} || [];
-    $link = [$link] if UNIVERSAL::isa( $link, "HASH" );
+    $link = [$link] if UNIVERSAL::isa( $link, 'HASH' );
     my $icon = (
         grep {
                ref $_
@@ -1506,10 +1585,10 @@ sub image {
             $newicon->{'-type'}  = $type if $type;
             $newicon->{'-title'} = $title if $title;
             my $flink = $self->{feed}->{link};
-            if ( UNIVERSAL::isa( $flink, "ARRAY" )) {
+            if ( UNIVERSAL::isa( $flink, 'ARRAY' )) {
                 push( @$flink, $newicon );
             }
-            elsif ( UNIVERSAL::isa( $flink, "HASH" )) {
+            elsif ( UNIVERSAL::isa( $flink, 'HASH' )) {
                 $self->{feed}->{link} = [ $flink, $newicon ];
             }
             else {
@@ -1541,6 +1620,10 @@ sub init_feed {
 
     $self->{feed} ||= XML::FeedPP::Element->new();
     XML::FeedPP::Element->ref_bless( $self->{feed} );
+
+    if ( ! UNIVERSAL::isa( $self->{feed}, 'HASH' ) ) {
+        Carp::croak "Invalid Atom 0.3 format: $self->{feed}";
+    }
 
     $self->xmlns( 'xmlns' => $XML::FeedPP::XMLNS_ATOM03 );
     $self->{feed}->{'-version'} ||= $XML::FeedPP::ATOM03_VERSION;
@@ -1601,7 +1684,7 @@ sub link {
     my $href = shift;
 
     my $link = $self->{feed}->{link} || [];
-    $link = [$link] if UNIVERSAL::isa( $link, "HASH" );
+    $link = [$link] if UNIVERSAL::isa( $link, 'HASH' );
     $link = [ grep { ref $_ } @$link ];
     $link = [ grep {
         ! exists $_->{'-rel'} || $_->{'-rel'} eq 'alternate'
@@ -1655,6 +1738,10 @@ sub init_feed {
 
     $self->{feed} ||= XML::FeedPP::Element->new();
     XML::FeedPP::Element->ref_bless( $self->{feed} );
+
+    if ( ! UNIVERSAL::isa( $self->{feed}, 'HASH' ) ) {
+        Carp::croak "Invalid Atom 1.0 format: $self->{feed}";
+    }
 
     $self->xmlns( 'xmlns' => $XML::FeedPP::XMLNS_ATOM10 );
 #   $self->{feed}->{'-version'} ||= $XML::FeedPP::ATOM10_VERSION;
@@ -1717,7 +1804,7 @@ sub link {
     my $href = shift;
 
     my $link = $self->{feed}->{link} || [];
-    $link = [$link] if UNIVERSAL::isa( $link, "HASH" );
+    $link = [$link] if UNIVERSAL::isa( $link, 'HASH' );
     $link = [ grep { ref $_ } @$link ];
     $link = [ grep {
         ! exists $_->{'-rel'} || $_->{'-rel'} eq 'alternate'
@@ -1951,7 +2038,8 @@ sub title {
 sub category {
     my $self = shift;
     if ( scalar @_ ) {
-        my $list = [ map {{-term=>$_};} @_ ];
+        my $cate = ref $_[0] ? $_[0] : \@_;
+        my $list = [ map {+{-term=>$_}} @$cate ];
         $self->{category} = ( scalar @$list > 1 ) ? $list : shift @$list;
     }
     else {
@@ -2001,7 +2089,7 @@ sub set {
                 # ok
             }
             elsif ( defined $node->{$child} ) {
-                $node->{$child} = { "#text" => $node->{$child} };
+                $node->{$child} = { '#text' => $node->{$child} };
             }
             else {
                 $node->{$child} = {};
@@ -2013,21 +2101,30 @@ sub set {
             $node->{ '-' . $attr } = $val;
         }
         elsif ( defined $attr ) {
+            if ( ref $node->{$tagname} && 
+                 UNIVERSAL::isa( $node->{$tagname}, 'ARRAY' )) {
+                $node->{$tagname} = shift @{$node->{$tagname}};
+            }
+            my $hkey = '-' . $attr;
             if ( ref $node->{$tagname} ) {
-                $node->{$tagname}->{ '-' . $attr } = $val;
+                $node->{$tagname}->{$hkey} = $val;
             }
             elsif ( defined $node->{$tagname} ) {
                 $node->{$tagname} = {
-                    "#text"     => $node->{$tagname},
-                    '-' . $attr => $val,
+                    '#text' => $node->{$tagname},
+                    $hkey   => $val,
                 };
             }
             else {
-                $node->{$tagname} = { '-' . $attr => $val, };
+                $node->{$tagname} = { $hkey => $val };
             }
         }
         elsif ( defined $tagname ) {
-            if ( ref $self->{$tagname} ) {
+            if ( ref $node->{$tagname} && 
+                 UNIVERSAL::isa( $node->{$tagname}, 'ARRAY' )) {
+                $node->{$tagname} = shift @{$node->{$tagname}};
+            }
+            if ( ref $node->{$tagname} ) {
                 $node->{$tagname}->{'#text'} = $val;
             }
             else {
@@ -2057,17 +2154,26 @@ sub get {
     }
     elsif ( defined $attr ) {                   # node@attribute
         return unless ref $node->{$tagname};
-        if ( UNIVERSAL::isa( $node->{$tagname}, "ARRAY" )) {
-            my $list = [ map { $_->{'-'.$attr} } 
-                         grep { exists $_->{'-'.$attr} }
-                         @{$node->{$tagname}} ];
-            return wantarray ? @$list : shift @$list;
+        my $hkey = '-' . $attr;
+        if ( UNIVERSAL::isa( $node->{$tagname}, 'ARRAY' )) {
+            my $list = [
+                map { ref $_ && exists $_->{$hkey} ? $_->{$hkey} : undef }
+                @{$node->{$tagname}} ];
+            return @$list if wantarray;
+            return ( grep { defined $_ } @$list )[0];
         }
-        return unless exists $node->{$tagname}->{ '-' . $attr };
-        return $node->{$tagname}->{ '-' . $attr };
+        return unless exists $node->{$tagname}->{$hkey};
+        return $node->{$tagname}->{$hkey};
     }
     else {                                      # node
         return $node->{$tagname} unless ref $node->{$tagname};
+        if ( UNIVERSAL::isa( $node->{$tagname}, 'ARRAY' )) {
+            my $list = [
+                map { ref $_ ? $_->{'#text'} : $_ }
+                @{$node->{$tagname}} ];
+            return @$list if wantarray;
+            return ( grep { defined $_ } @$list )[0];
+        }
         return $node->{$tagname}->{'#text'};
     }
 }
@@ -2076,14 +2182,14 @@ sub get_set_array {
     my $self = shift;
     my $elem = shift;
     my $value = shift;
-    if ( defined $value ) {
+    if ( ref $value ) {
+        $self->{$elem} = $value;
+    } elsif ( defined $value ) {
         $value = [ $value, @_ ] if scalar @_;
         $self->{$elem} = $value;
     } else {
-        return unless exists $self->{$elem};
-        my $list = $self->{$elem};
-        return $list unless ref $list;
-        return ( scalar @$list > 1 ) ? $list : shift @$list;
+        my @ret = $self->get_value($elem);
+        return scalar @ret > 1 ? \@ret : $ret[0];
     }
 }
 
@@ -2099,14 +2205,29 @@ sub get_value {
     my $self = shift;
     my $elem = shift;
     return unless exists $self->{$elem};
-    return $self->{$elem} unless ref $self->{$elem};
-    return $self->{$elem}->{'#text'} if exists $self->{$elem}->{'#text'};
+    my $value = $self->{$elem} or return;
+    return $value unless ref $value;
+
+    # multiple elements
+    if ( UNIVERSAL::isa( $value, 'ARRAY' )) {
+        if ( wantarray ) {
+            return map { ref $_ && exists $_->{'#text'}
+                         ? $_->{'#text'} : $_ } @$value;
+        } else {
+            return ref $value->[0] && exists $value->[0]->{'#text'}
+                   ? $value->[0]->{'#text'} : $value->[0];
+        }
+    }
+
+    # text node of an element with attributes
+    return $value->{'#text'} if exists $value->{'#text'};
+
     # a hack for atom: <content type="xhtml"><div>...</div></content>
-    my $child = [ grep { /^[^\-\#]/ } keys %{$self->{$elem}} ];
-    if ( exists $self->{$elem}->{'-type'}
-        && ($self->{$elem}->{'-type'} eq "xhtml")
+    my $child = [ grep { /^[^\-\#]/ } keys %$value ];
+    if ( exists $value->{'-type'}
+        && ($value->{'-type'} eq "xhtml")
         && scalar @$child == 1) {
-        return &get_value( $self->{$elem}, $child->[0] );
+        return &get_value( $value, $child->[0] );
     }
     return;
 }
@@ -2142,7 +2263,7 @@ sub set_attr {
     my $attr = \@_;
     if ( defined $self->{$elem} ) {
         if ( !ref $self->{$elem} ) {
-            $self->{$elem} = { "#text" => $self->{$elem} };
+            $self->{$elem} = { '#text' => $self->{$elem} };
         }
     }
     else {
@@ -2215,6 +2336,8 @@ sub rfc1123_to_w3cdtf {
     return unless defined $str;
     my ( $mday, $mon, $year, $hour, $min, $sec, $tz ) = ( $str =~ $rfc1123_regexp );
     return unless ( $year && $mon && $mday );
+    $year += 2000 if $year < 77;
+    $year += 1900 if $year < 100;
     $mon = $MoY{ uc($mon) } or return;
     if ( defined $tz && $tz ne '' && $tz ne 'GMT' ) {
         my $off = &get_tz_offset($tz) / 60;
@@ -2255,6 +2378,8 @@ sub rfc1123_to_epoch {
     return unless defined $str;
     my ( $mday, $mon, $year, $hour, $min, $sec, $tz ) = ( $str =~ $rfc1123_regexp );
     return unless ( $year && $mon && $mday );
+    $year += 2000 if $year < 77;
+    $year += 1900 if $year < 100;
     $mon = $MoY{ uc($mon) } or return;
     my $epoch = Time::Local::timegm( $sec, $min, $hour, $mday, $mon-1, $year-1900 );
     $epoch -= &get_tz_offset( $tz );
